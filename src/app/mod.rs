@@ -1397,9 +1397,17 @@ mod tests {
                 },
             ),
         };
+        let pane_rename = crate::api::schema::Request {
+            id: "req_3".into(),
+            method: crate::api::schema::Method::PaneRename(crate::api::schema::PaneRenameParams {
+                pane_id: "w_1-1".into(),
+                label: Some("logs".into()),
+            }),
+        };
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(crate::api::request_changes_ui(&mutating));
+        assert!(crate::api::request_changes_ui(&pane_rename));
     }
 
     #[test]

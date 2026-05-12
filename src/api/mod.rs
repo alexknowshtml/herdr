@@ -40,6 +40,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::TabRename(_)
             | Method::TabClose(_)
             | Method::PaneSplit(_)
+            | Method::PaneRename(_)
             | Method::PaneReportAgent(_)
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)

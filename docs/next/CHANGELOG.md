@@ -9,6 +9,7 @@
 
 ### Changed
 - Native agent session restore is now enabled by default for supported panes with current official integrations. Set `[session] resume_agents_on_restore = false` to disable it.
+- Claude Code, Codex, and OpenCode integrations now report session identity only. Native state for those agents comes from Herdr's screen detection, while Pi, OMP, GitHub Copilot CLI, Hermes Agent, Qoder CLI, and custom socket integrations can still report state.
 
 ### Fixed
 - Kiro sub-agent tool approval prompts are now detected as blocked instead of working. (#388)

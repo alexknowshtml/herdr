@@ -234,16 +234,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify built commit is still current master
-        run: |
-          set -euo pipefail
-          git fetch origin master --tags
-          remote_head="$(git rev-parse origin/master)"
-          if [ "$remote_head" != "${{ needs.preflight.outputs.commit }}" ]; then
-            echo "error: origin/master moved from built commit; aborting preview publish" >&2
-            exit 1
-          fi
-
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:

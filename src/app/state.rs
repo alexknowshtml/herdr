@@ -1377,6 +1377,10 @@ pub struct AppState {
     pub settings: SettingsState,
     /// Cached integration recommendations for onboarding/settings UI.
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
+    /// Cached detection manifest source/version summaries for runtime/API status.
+    pub agent_manifest_summaries: Vec<crate::detect::manifest::AgentManifestSummary>,
+    /// Cached remote detection manifest update diagnostics for runtime/API status.
+    pub agent_manifest_update_status: crate::detect::manifest_update::ManifestUpdateStatus,
     /// Result messages from the latest integration install action.
     pub integration_install_messages: Vec<String>,
     /// Highlight state for the bottom-right global launcher menu.
@@ -1431,6 +1435,10 @@ impl AppState {
         self.integration_recommendations
             .iter()
             .any(|item| item.state == crate::integration::IntegrationStatusKind::Outdated)
+    }
+
+    pub(crate) fn refresh_agent_manifest_summaries(&mut self) {
+        self.agent_manifest_summaries = crate::detect::manifest::manifest_summaries();
     }
 
     pub(crate) fn global_menu_attention_badge_visible(&self) -> bool {
@@ -1700,6 +1708,9 @@ impl AppState {
                 original_theme: None,
             },
             integration_recommendations: Vec::new(),
+            agent_manifest_summaries: Vec::new(),
+            agent_manifest_update_status:
+                crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),

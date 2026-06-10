@@ -31,6 +31,7 @@ pub struct HookAuthority {
 struct SuppressedFullLifecycleHookReport {
     agent_label: String,
     session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    observed_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,7 +174,7 @@ impl TerminalState {
         agent: Option<Agent>,
         fallback_state: AgentState,
         visible_blocker: bool,
-        _ignored_screen_idle: bool,
+        _visible_idle: bool,
         _visible_working: bool,
         process_exited: bool,
         now: Instant,
@@ -193,6 +194,19 @@ impl TerminalState {
             {
                 self.detected_agent = agent;
             }
+            return TerminalStateMutation {
+                effective_state_change: self.recompute_effective_state(
+                    previous_agent_label,
+                    previous_known_agent,
+                    previous_state,
+                    previous_presentation,
+                    now,
+                ),
+                session_ref_changed: previous_session
+                    != self.current_session_identity_for_persistence(),
+            };
+        }
+        if !process_exited && self.detected_state_observed_before_release_suppression(agent, now) {
             return TerminalStateMutation {
                 effective_state_change: self.recompute_effective_state(
                     previous_agent_label,
@@ -448,7 +462,7 @@ impl TerminalState {
             .hook_authority
             .as_ref()
             .filter(|authority| {
-                crate::agent_detection_policy::full_lifecycle_hook_authority(
+                crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
                     &authority.agent_label,
                 )
@@ -464,13 +478,14 @@ impl TerminalState {
                 SuppressedFullLifecycleHookReport {
                     agent_label,
                     session_ref,
+                    observed_at: Instant::now(),
                 },
             );
         }
     }
 
     fn suppress_full_lifecycle_hook_report(&mut self, source: &str, agent_label: &str) {
-        if crate::agent_detection_policy::full_lifecycle_hook_authority(source, agent_label) {
+        if crate::detect::full_lifecycle_hook_authority(source, agent_label) {
             self.suppressed_full_lifecycle_hook_reports.insert(
                 source.to_string(),
                 SuppressedFullLifecycleHookReport {
@@ -479,6 +494,7 @@ impl TerminalState {
                         .hook_authority
                         .as_ref()
                         .and_then(|authority| authority.session_ref.clone()),
+                    observed_at: Instant::now(),
                 },
             );
         }
@@ -490,7 +506,7 @@ impl TerminalState {
         agent_label: &str,
         session_ref: &Option<crate::agent_resume::AgentSessionRef>,
     ) -> bool {
-        if !crate::agent_detection_policy::full_lifecycle_hook_authority(source, agent_label) {
+        if !crate::detect::full_lifecycle_hook_authority(source, agent_label) {
             return false;
         }
         self.suppressed_full_lifecycle_hook_reports
@@ -517,10 +533,8 @@ impl TerminalState {
         let Some(authority) = self.hook_authority.as_ref() else {
             return false;
         };
-        if !crate::agent_detection_policy::full_lifecycle_hook_authority(
-            &authority.source,
-            &authority.agent_label,
-        ) {
+        if !crate::detect::full_lifecycle_hook_authority(&authority.source, &authority.agent_label)
+        {
             return false;
         }
         if authority.source != source || authority.agent_label != agent_label {
@@ -548,6 +562,22 @@ impl TerminalState {
             .retain(|_, agent_label| {
                 crate::detect::parse_agent_label(&agent_label.agent_label) != Some(detected_agent)
             });
+    }
+
+    fn detected_state_observed_before_release_suppression(
+        &self,
+        detected_agent: Option<Agent>,
+        observed_at: Instant,
+    ) -> bool {
+        let Some(detected_agent) = detected_agent else {
+            return false;
+        };
+        self.suppressed_full_lifecycle_hook_reports
+            .values()
+            .any(|suppressed| {
+                crate::detect::parse_agent_label(&suppressed.agent_label) == Some(detected_agent)
+                    && observed_at <= suppressed.observed_at
+            })
     }
 
     fn current_session_identity_for_persistence(
@@ -791,6 +821,10 @@ impl TerminalState {
         self.detected_agent
     }
 
+    pub fn full_lifecycle_hook_authority_active(&self) -> bool {
+        self.live_full_lifecycle_hook_authority()
+    }
+
     fn visible_blocker_overrides_hook(&self) -> bool {
         if self.live_full_lifecycle_hook_authority() {
             return false;
@@ -806,10 +840,7 @@ impl TerminalState {
 
     fn live_full_lifecycle_hook_authority(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
-            crate::agent_detection_policy::full_lifecycle_hook_authority(
-                &authority.source,
-                &authority.agent_label,
-            )
+            crate::detect::full_lifecycle_hook_authority(&authority.source, &authority.agent_label)
         })
     }
 
@@ -935,6 +966,7 @@ mod tests {
         let detection = AgentDetection {
             state: AgentState::Idle,
             skip_state_update: false,
+            visible_idle: false,
             visible_blocker: false,
             visible_working: false,
         };
@@ -1082,6 +1114,39 @@ mod tests {
 
         assert!(stale.is_none());
         assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn process_exit_clears_omp_full_lifecycle_hook_authority_without_known_agent() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority_with_custom_status_at(
+            "herdr:omp".into(),
+            "omp".into(),
+            AgentState::Working,
+            None,
+            None,
+            None,
+            Some(10),
+            now,
+        );
+
+        let change = terminal.set_detected_state_with_screen_signals_at(
+            None,
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            true,
+            now + Duration::from_millis(1),
+        );
+
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(
+            change.effective_state_change.unwrap().previous_state,
+            AgentState::Working
+        );
     }
 
     #[test]
@@ -1291,7 +1356,6 @@ mod tests {
 
     #[test]
     fn fresh_detected_process_allows_full_lifecycle_hook_after_suppression() {
-        let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority(
@@ -1302,6 +1366,7 @@ mod tests {
             Some(20),
         );
         terminal.release_agent("herdr:pi", "pi", Some(21));
+        let now = Instant::now();
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
@@ -1323,6 +1388,43 @@ mod tests {
         assert!(fresh.is_some());
         assert!(terminal.hook_authority.is_some());
         assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn release_suppression_ignores_same_agent_idle_publish() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(20),
+        );
+        terminal.release_agent("herdr:pi", "pi", Some(21));
+
+        let change = terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            now,
+        );
+        let late = terminal.set_hook_authority(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            Some(22),
+        );
+
+        assert!(change.effective_state_change.is_none());
+        assert!(late.is_none());
+        assert_eq!(terminal.detected_agent, None);
+        assert_eq!(terminal.state, AgentState::Unknown);
     }
 
     #[test]

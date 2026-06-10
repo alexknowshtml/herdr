@@ -194,11 +194,13 @@ pub(crate) fn settings_primary_button_label(
 }
 
 pub(crate) fn settings_show_primary_action(app: &AppState) -> bool {
-    app.settings.section != crate::app::state::SettingsSection::Integrations
-        || app
+    match app.settings.section {
+        crate::app::state::SettingsSection::Integrations => app
             .integration_recommendations
             .iter()
-            .any(crate::integration::IntegrationRecommendation::needs_install)
+            .any(crate::integration::IntegrationRecommendation::needs_install),
+        _ => true,
+    }
 }
 
 pub(crate) fn settings_button_rects(

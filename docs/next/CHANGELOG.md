@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Agent state detection for non-authoritative agents now comes from screen manifests instead of PTY-first semantic arbitration, so terminal output activity no longer publishes `working`, vetoes visible blockers, or decides idle fallback.
 - Numeric keypad keys that send VT100 application-keypad escape sequences now enter their digits and operators instead of being dropped. (#493)
 - Codex panes now stay marked working when the live status header uses reasoning-summary text such as `Investigating code output` instead of the literal `Working` label. (#501)
 - Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms.
@@ -13,6 +14,8 @@
 - Full-screen TUIs such as Neovim now receive resize-generated terminal responses after Herdr internal pane resizes, so grown panes redraw without waiting for extra input. (#471)
 
 ### Added
+- Added remote auto-updates for agent detection manifests, with per-agent validation, local override precedence, `herdr server agent-manifests` diagnostics, and explain output showing remote manifest status.
+- Added `herdr agent explain` to show the manifest source, matched rule, evaluated matcher and region evidence, visible evidence flags, skipped-update reason, and idle fallback reason for live panes or saved screen fixtures.
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
 - Added `herdr integration install kilo` for Kilo Code CLI plugins that report lifecycle state and session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Kilo panes with `kilo --session <id>`.
 - Added directional pane swap with `prefix+shift+h/j/k/l`, a pane context-menu swap action, pane layout/neighbor/edge/focus/resize socket APIs, matching CLI commands, and optional `pane split --ratio` support.
@@ -21,7 +24,7 @@
 - Added native Windows beta documentation, `install.ps1`, preview Windows release assets, update-channel wiring, and platform capability tracking for ConPTY panes, semantic client input, Windows agent discovery, known partial cwd behavior, and unsupported Unix-only features such as live handoff, direct terminal attach, and `herdr --remote` from the Windows binary.
 
 ### Changed
-- OpenCode installed with the current Herdr plugin now reports lifecycle state directly instead of relying on PTY/screen state detection. Droid, Kimi Code CLI, and Qoder CLI now report native session identity while leaving lifecycle state to PTY/screen detection.
+- OpenCode installed with the current Herdr plugin now reports lifecycle state directly instead of relying on screen manifest detection. Droid, Kimi Code CLI, and Qoder CLI now report native session identity while leaving lifecycle state to screen manifest detection.
 
 ## [0.6.8] - 2026-06-04
 
@@ -45,7 +48,7 @@ This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes t
 - Added a remote SSH bridge keepalive fallback. `herdr --remote` now generates a temporary SSH config that includes the user's SSH config first, then adds `ServerAliveInterval` and `ServerAliveCountMax` only when the user has not already configured keepalives. Set `[remote].manage_ssh_config = false` to disable this. (#354, #355, thanks @SunskyXH)
 - Added `ui.right_click_passthrough_modifier` so a configured modifier such as `ctrl` can forward right-click hold and drag gestures to mouse-reporting pane apps while normal right-click still opens Herdr's pane menu. (#148)
 - Added Kilo Code CLI automatic detection for idle, working, and blocked terminal states. (#270)
-- Added `herdr integration install copilot` for GitHub Copilot CLI hooks that report native session ids through Herdr's socket API. Copilot state still comes from Herdr's PTY/screen detection because Copilot hooks do not provide complete lifecycle coverage. When native agent session restore is enabled, Herdr can resume Copilot panes with `copilot --resume=<id>`. (#232, #386, thanks @LaneBirmingham)
+- Added `herdr integration install copilot` for GitHub Copilot CLI hooks that report native session ids through Herdr's socket API. Copilot state still comes from Herdr's screen detection because Copilot hooks do not provide complete lifecycle coverage. When native agent session restore is enabled, Herdr can resume Copilot panes with `copilot --resume=<id>`. (#232, #386, thanks @LaneBirmingham)
 
 ### Changed
 - Native agent session restore is now enabled by default for supported panes with current official integrations. Set `[session] resume_agents_on_restore = false` to disable it.

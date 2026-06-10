@@ -3361,6 +3361,14 @@ impl HeadlessServer {
 
         if self
             .app
+            .next_agent_manifest_update_check
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app.run_agent_manifest_update_check();
+        }
+
+        if self
+            .app
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -4764,6 +4772,16 @@ next_tab = ""
                         } if custom_status.is_none()
                     )
             }));
+    }
+
+    #[test]
+    fn headless_scheduled_tasks_clears_disabled_agent_manifest_update_deadline() {
+        let mut server = test_headless_server();
+        let now = Instant::now();
+        server.app.next_agent_manifest_update_check = Some(now - Duration::from_millis(1));
+
+        assert!(!server.handle_scheduled_tasks_headless(now, false));
+        assert_eq!(server.app.next_agent_manifest_update_check, None);
     }
 
     #[tokio::test]

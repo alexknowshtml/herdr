@@ -2312,6 +2312,36 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::AgentDetectionManifestsUpdated { updated, status } => {
+                self.agent_manifest_update_status = status;
+                self.refresh_agent_manifest_summaries();
+                if !updated.is_empty()
+                    && matches!(
+                        self.toast_config.delivery,
+                        crate::config::ToastDelivery::Herdr
+                    )
+                {
+                    let agent_list = updated
+                        .iter()
+                        .map(|item| {
+                            format!(
+                                "{} {}",
+                                crate::detect::agent_label(item.agent),
+                                item.version
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.toast = Some(ToastNotification {
+                        kind: ToastKind::UpdateInstalled,
+                        title: "Agent detection rules updated".to_string(),
+                        context: agent_list,
+                        position: None,
+                        target: None,
+                    });
+                }
+                Vec::new()
+            }
             AppEvent::StateChanged {
                 pane_id,
                 agent,
@@ -2520,14 +2550,15 @@ impl AppState {
     ) -> Option<PaneStateUpdate> {
         let observed_at = std::time::Instant::now();
         self.update_terminal_state(pane_id, |terminal| {
-            let agent = terminal
-                .effective_known_agent()
-                .or(terminal.detected_agent)?;
+            let agent = terminal.effective_known_agent().or(terminal.detected_agent);
+            if agent.is_none() && !terminal.full_lifecycle_hook_authority_active() {
+                return None;
+            }
             Some(terminal.set_detected_state_with_screen_signals_at(
-                Some(agent),
+                agent,
                 AgentState::Idle,
                 false,
-                false,
+                true,
                 false,
                 true,
                 observed_at,
@@ -4681,6 +4712,35 @@ mod tests {
             toast.context,
             "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
         );
+    }
+
+    #[test]
+    fn agent_detection_manifest_update_event_updates_status_and_toast() {
+        let mut state = AppState::test_new();
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let status = crate::detect::manifest_update::ManifestUpdateStatus {
+            last_result: Some("checked".to_string()),
+            ..Default::default()
+        };
+
+        let updates = state.handle_app_event(AppEvent::AgentDetectionManifestsUpdated {
+            updated: vec![crate::detect::manifest_update::ManifestUpdateCommit {
+                agent: Agent::Codex,
+                version: crate::detect::manifest_update::ManifestVersion::parse("2026.06.10.1")
+                    .unwrap(),
+            }],
+            status,
+        });
+
+        assert!(updates.is_empty());
+        assert_eq!(
+            state.agent_manifest_update_status.last_result.as_deref(),
+            Some("checked")
+        );
+        let toast = state.toast.as_ref().expect("manifest update toast");
+        assert_eq!(toast.kind, ToastKind::UpdateInstalled);
+        assert_eq!(toast.title, "Agent detection rules updated");
+        assert_eq!(toast.context, "codex 2026.06.10.1");
     }
 
     #[test]

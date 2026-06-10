@@ -69,6 +69,7 @@ impl App {
         if let AppEvent::PaneDied { pane_id } = &ev {
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
+                self.sync_full_lifecycle_authority_detection_pauses();
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
                 self.emit_pane_state_update(&update);
                 self.emit_terminal_or_system_agent_notifications(std::slice::from_ref(&update));
@@ -123,17 +124,18 @@ impl App {
         } else {
             None
         };
+        let manifest_update_agents =
+            if let AppEvent::AgentDetectionManifestsUpdated { updated, .. } = &ev {
+                Some(updated.iter().map(|item| item.agent).collect::<Vec<_>>())
+            } else {
+                None
+            };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
-        if terminal_cwd_reported {
-            self.mark_git_status_refresh_due(Instant::now());
+        if let Some(agents) = manifest_update_agents {
+            self.reset_agent_detection_for_agents(&agents);
         }
-        for update in &pane_updates {
-            self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
-            self.emit_pane_state_update(update);
-        }
-        self.sync_agent_metadata_deadline();
         if let Some((pane_id, agent)) = released_agent {
             if pane_updates.iter().any(|update| update.pane_id == pane_id) {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
@@ -147,6 +149,15 @@ impl App {
                 }
             }
         }
+        self.sync_full_lifecycle_authority_detection_pauses();
+        if terminal_cwd_reported {
+            self.mark_git_status_refresh_due(Instant::now());
+        }
+        for update in &pane_updates {
+            self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
+            self.emit_pane_state_update(update);
+        }
+        self.sync_agent_metadata_deadline();
         if let Some(overlay) = overlay_state {
             self.restore_overlay_after_exit(overlay);
         }
@@ -173,6 +184,29 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+    }
+
+    fn reset_agent_detection_for_agents(&self, agents: &[crate::detect::Agent]) {
+        if agents.is_empty() {
+            return;
+        }
+        for (terminal_id, terminal) in &self.state.terminals {
+            let Some(agent) = terminal.effective_known_agent().or(terminal.detected_agent) else {
+                continue;
+            };
+            if !agents.contains(&agent) {
+                continue;
+            }
+            if let Some(runtime) = self.terminal_runtimes.get(terminal_id) {
+                runtime.reset_agent_detection();
+            }
+        }
+    }
+
+    fn reset_all_agent_detection_runtimes(&self) {
+        for runtime in self.terminal_runtimes.values() {
+            runtime.reset_agent_detection();
+        }
     }
 
     pub(crate) fn refresh_new_herdr_toast_context_for_update(
@@ -215,6 +249,26 @@ impl App {
         );
         if let Some(toast) = self.state.toast.as_mut() {
             toast.context = context;
+        }
+    }
+
+    fn sync_full_lifecycle_authority_detection_pauses(&self) {
+        for workspace in &self.state.workspaces {
+            for tab in &workspace.tabs {
+                for pane in tab.panes.values() {
+                    let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id)
+                    else {
+                        continue;
+                    };
+                    let Some(runtime) = self.terminal_runtimes.get(&pane.attached_terminal_id)
+                    else {
+                        continue;
+                    };
+                    runtime.set_full_lifecycle_authority_active(
+                        terminal.full_lifecycle_hook_authority_active(),
+                    );
+                }
+            }
         }
     }
 
@@ -624,6 +678,39 @@ impl App {
                     },
                 }
             }
+            Method::ServerAgentManifests(_) => {
+                self.state.refresh_agent_manifest_summaries();
+                let update_status = crate::detect::manifest_update::load_status();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::AgentManifestStatus {
+                        last_check_unix: update_status.last_check_unix,
+                        last_result: update_status.last_result.clone(),
+                        manifests: self
+                            .state
+                            .agent_manifest_summaries
+                            .clone()
+                            .into_iter()
+                            .map(|summary| agent_manifest_info(summary, &update_status))
+                            .collect(),
+                    },
+                }
+            }
+            Method::ServerReloadAgentManifests(_) => {
+                let summaries = crate::detect::manifest::reload_manifests();
+                self.state.agent_manifest_summaries = summaries.clone();
+                let update_status = crate::detect::manifest_update::load_status();
+                self.reset_all_agent_detection_runtimes();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::AgentManifestReload {
+                        manifests: summaries
+                            .into_iter()
+                            .map(|summary| agent_manifest_info(summary, &update_status))
+                            .collect(),
+                    },
+                }
+            }
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);
             }
@@ -661,6 +748,7 @@ impl App {
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
+            Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSend(params) => return self.handle_agent_send(request.id, params),
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
@@ -838,6 +926,25 @@ fn sanitized_notification_text(value: &str, max_chars: usize) -> Option<String> 
     (!sanitized.is_empty()).then_some(sanitized)
 }
 
+fn agent_manifest_info(
+    summary: crate::detect::manifest::AgentManifestSummary,
+    update_status: &crate::detect::manifest_update::ManifestUpdateStatus,
+) -> crate::api::schema::AgentManifestInfo {
+    let remote = update_status.agent_status(summary.agent);
+    crate::api::schema::AgentManifestInfo {
+        agent: crate::detect::agent_label(summary.agent).to_string(),
+        source: summary.active_source.label(),
+        source_kind: summary.active_source.kind().to_string(),
+        active_version: summary.active_version,
+        cached_remote_version: summary.cached_remote_version,
+        local_override_shadowing_remote: summary.local_override_shadowing_remote,
+        remote_update_result: remote.as_ref().map(|status| status.last_result.clone()),
+        remote_update_error: remote.as_ref().and_then(|status| status.last_error.clone()),
+        remote_last_checked_unix: remote.and_then(|status| status.last_checked_unix),
+        warning: summary.warning,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,6 +958,229 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git init failed for {}", path.display());
+    }
+
+    #[tokio::test]
+    async fn manifest_update_event_resets_matching_agent_detection_runtime() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("manifest-reset")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Codex);
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let reset_notify = runtime.agent_detection_reset_notify_for_test();
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        app.handle_internal_event(AppEvent::AgentDetectionManifestsUpdated {
+            updated: vec![crate::detect::manifest_update::ManifestUpdateCommit {
+                agent: Agent::Codex,
+                version: crate::detect::manifest_update::ManifestVersion::parse("2026.06.10.1")
+                    .unwrap(),
+            }],
+            status: crate::detect::manifest_update::ManifestUpdateStatus::default(),
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reset_notify.notified(),
+        )
+        .await
+        .expect("matching agent detection runtime should be reset");
+    }
+
+    #[tokio::test]
+    async fn server_reload_agent_manifests_resets_detection_runtimes() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("manifest-reload")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let reset_notify = runtime.agent_detection_reset_notify_for_test();
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "reload_manifests".into(),
+            method: crate::api::schema::Method::ServerReloadAgentManifests(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "agent_manifest_reload");
+        assert!(!response["result"]["manifests"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reset_notify.notified(),
+        )
+        .await
+        .expect("manual manifest reload should reset detection runtimes");
+    }
+
+    #[tokio::test]
+    async fn server_agent_manifests_reports_status_without_resetting_runtimes() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("manifest-status")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let reset_notify = runtime.agent_detection_reset_notify_for_test();
+        app.terminal_runtimes.insert(terminal_id, runtime);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "manifest_status".into(),
+            method: crate::api::schema::Method::ServerAgentManifests(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "agent_manifest_status");
+        assert!(!response["result"]["manifests"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                reset_notify.notified(),
+            )
+            .await
+            .is_err(),
+            "status request should not reset detection runtimes"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_explain_evaluates_with_server_manifest_cache() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-explain")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Codex);
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            80,
+            24,
+            b"press enter to confirm or esc to cancel",
+        );
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "agent_explain".into(),
+            method: crate::api::schema::Method::AgentExplain(crate::api::schema::AgentTarget {
+                target,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "agent_explain");
+        assert_eq!(response["result"]["explain"]["state"], "blocked");
+        assert_eq!(
+            response["result"]["explain"]["matched_rule"]["id"],
+            "live_strong_blocker"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_explain_reports_hook_only_full_lifecycle_authority() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-explain-omp")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority(
+                "herdr:omp".to_string(),
+                "omp".to_string(),
+                AgentState::Working,
+                None,
+                Some(1),
+            );
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "agent_explain_omp".into(),
+            method: crate::api::schema::Method::AgentExplain(crate::api::schema::AgentTarget {
+                target,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "agent_explain");
+        assert_eq!(response["result"]["explain"]["agent"], "omp");
+        assert_eq!(response["result"]["explain"]["state"], "working");
+        assert_eq!(
+            response["result"]["explain"]["screen_detection_skip_reason"],
+            "full_lifecycle_hook_authority"
+        );
+        assert_eq!(
+            response["result"]["explain"]["matched_rule"],
+            serde_json::Value::Null
+        );
     }
 
     #[cfg(unix)]

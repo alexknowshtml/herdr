@@ -33,11 +33,10 @@ mod xtgettcap;
 
 use self::agent_detection::{
     agent_caused_pty_activity_active, baseline_pty_causality, decide_detection_screen_read,
-    decide_pty_working_publish_without_screen, decide_screen_detection_publish,
-    detection_update_for_publish, handle_skipped_detection_update, observe_pty_output_activity,
-    DetectionPublishDecision, DetectionScreenReadDecision, DetectionScreenReadInput,
-    PendingIdleConfirmation, PendingWorkingConfirmation, PostTaintWorkingLease,
-    PtyCausalityTracker, PtyWorkingPublishInput, ScreenDetectionPublishInput,
+    decide_screen_detection_publish, detection_update_for_publish, handle_skipped_detection_update,
+    observe_pty_output_activity, DetectionPublishDecision, DetectionScreenReadDecision,
+    DetectionScreenReadInput, PendingIdleConfirmation, PendingWorkingConfirmation,
+    PostTaintWorkingLease, PtyCausalityTracker, ScreenDetectionPublishInput,
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
@@ -123,6 +122,7 @@ async fn publish_state_changed_event(
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPublishUpdate {
     state: AgentState,
+    visible_idle: bool,
     visible_blocker: bool,
     visible_working: bool,
     process_exited: bool,
@@ -135,12 +135,14 @@ async fn apply_agent_detection_publish_update(
     update: AgentDetectionPublishUpdate,
     observed_at: std::time::Instant,
     state: &mut AgentState,
+    last_visible_idle: &mut bool,
     last_visible_blocker: &mut bool,
     last_visible_working: &mut bool,
     last_visible_signal_refresh: &mut Option<std::time::Instant>,
     foreground_shell_exit_reported: &mut bool,
 ) {
     *state = update.state;
+    *last_visible_idle = update.visible_idle;
     *last_visible_blocker = update.visible_blocker;
     *last_visible_working = update.visible_working;
     *last_visible_signal_refresh = if update.visible_blocker || update.visible_working {
@@ -384,6 +386,7 @@ fn spawn_basic_detection_task(
     terminal: Arc<PaneTerminal>,
     pty_output_seq: Arc<AtomicU64>,
     input_write_seq: Arc<AtomicU64>,
+    full_lifecycle_authority_active: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
 ) -> (
     tokio::task::AbortHandle,
@@ -398,6 +401,7 @@ fn spawn_basic_detection_task(
     let handle = tokio::spawn(async move {
         let mut agent_presence = AgentDetectionPresence::from_agent(None);
         let mut state = AgentState::Unknown;
+        let mut last_visible_idle = false;
         let mut last_visible_blocker = false;
         let mut last_visible_working = false;
         let mut last_visible_signal_refresh = None;
@@ -431,6 +435,7 @@ fn spawn_basic_detection_task(
                 _ = detect_reset.notified() => {
                     agent_presence = AgentDetectionPresence::from_agent(None);
                     state = AgentState::Unknown;
+                    last_visible_idle = false;
                     last_visible_blocker = false;
                     last_visible_working = false;
                     last_visible_signal_refresh = None;
@@ -547,6 +552,7 @@ fn spawn_basic_detection_task(
                                 input_write_seq.load(Ordering::Relaxed),
                             );
                             state = AgentState::Idle;
+                            last_visible_idle = true;
                             last_visible_blocker = false;
                             last_visible_working = false;
                             last_visible_signal_refresh = None;
@@ -571,6 +577,13 @@ fn spawn_basic_detection_task(
             let process_exited = pending_foreground_shell_clear
                 && agent.is_some()
                 && !foreground_shell_exit_reported;
+
+            if full_lifecycle_authority_active.load(Ordering::Acquire) && !process_exited {
+                pending_idle.clear();
+                pending_working.clear();
+                post_taint_working.clear();
+                continue;
+            }
 
             if let Some(until) = agent_startup_grace_until {
                 if process_exited {
@@ -622,76 +635,6 @@ fn spawn_basic_detection_task(
             }) {
                 DetectionScreenReadDecision::Read => {}
                 DetectionScreenReadDecision::Skip => continue,
-                DetectionScreenReadDecision::EvaluatePtyWorking => {
-                    match decide_pty_working_publish_without_screen(
-                        PtyWorkingPublishInput {
-                            agent,
-                            current_state: state,
-                            last_visible_blocker,
-                            last_visible_working,
-                            last_visible_signal_refresh,
-                            pty_activity,
-                            now,
-                        },
-                        &mut pending_idle,
-                        &mut pending_working,
-                        &mut post_taint_working,
-                    ) {
-                        DetectionPublishDecision::NoPublish => {}
-                        DetectionPublishDecision::Publish {
-                            state: new_state,
-                            visible_blocker,
-                            visible_working,
-                            process_exited: publish_process_exited,
-                        } => {
-                            apply_agent_detection_publish_update(
-                                state_events.clone(),
-                                pane_id,
-                                agent,
-                                AgentDetectionPublishUpdate {
-                                    state: new_state,
-                                    visible_blocker,
-                                    visible_working,
-                                    process_exited: publish_process_exited,
-                                },
-                                now,
-                                &mut state,
-                                &mut last_visible_blocker,
-                                &mut last_visible_working,
-                                &mut last_visible_signal_refresh,
-                                &mut foreground_shell_exit_reported,
-                            )
-                            .await;
-                        }
-                    }
-                    continue;
-                }
-                DetectionScreenReadDecision::Publish {
-                    state: new_state,
-                    visible_blocker,
-                    visible_working,
-                    process_exited: publish_process_exited,
-                } => {
-                    apply_agent_detection_publish_update(
-                        state_events.clone(),
-                        pane_id,
-                        agent,
-                        AgentDetectionPublishUpdate {
-                            state: new_state,
-                            visible_blocker,
-                            visible_working,
-                            process_exited: publish_process_exited,
-                        },
-                        now,
-                        &mut state,
-                        &mut last_visible_blocker,
-                        &mut last_visible_working,
-                        &mut last_visible_signal_refresh,
-                        &mut foreground_shell_exit_reported,
-                    )
-                    .await;
-                    continue;
-                }
             }
 
             let content = terminal.detection_text();
@@ -740,16 +683,15 @@ fn spawn_basic_detection_task(
             };
             match decide_screen_detection_publish(
                 ScreenDetectionPublishInput {
-                    agent,
                     screen_detection,
                     current_state: state,
+                    last_visible_idle,
                     last_visible_blocker,
                     last_visible_working,
                     last_visible_signal_refresh,
                     process_exited,
                     agent_changed,
                     pty_activity,
-                    content: &content,
                     now,
                 },
                 &mut pending_idle,
@@ -759,6 +701,7 @@ fn spawn_basic_detection_task(
                 DetectionPublishDecision::NoPublish => {}
                 DetectionPublishDecision::Publish {
                     state: new_state,
+                    visible_idle,
                     visible_blocker,
                     visible_working,
                     process_exited: publish_process_exited,
@@ -769,12 +712,14 @@ fn spawn_basic_detection_task(
                         agent,
                         AgentDetectionPublishUpdate {
                             state: new_state,
+                            visible_idle,
                             visible_blocker,
                             visible_working,
                             process_exited: publish_process_exited,
                         },
                         now,
                         &mut state,
+                        &mut last_visible_idle,
                         &mut last_visible_blocker,
                         &mut last_visible_working,
                         &mut last_visible_signal_refresh,
@@ -854,6 +799,7 @@ pub struct PaneRuntime {
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     input_write_seq: Arc<AtomicU64>,
+    full_lifecycle_authority_active: Arc<AtomicBool>,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
@@ -1658,12 +1604,14 @@ impl PaneRuntime {
             })?)
         };
 
+        let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
             terminal.clone(),
             pty_output_seq,
             input_write_seq.clone(),
+            full_lifecycle_authority_active.clone(),
             events,
         );
 
@@ -1677,6 +1625,7 @@ impl PaneRuntime {
             child_wait_completed: None,
             kitty_keyboard_flags,
             input_write_seq,
+            full_lifecycle_authority_active,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
@@ -1727,6 +1676,7 @@ impl PaneRuntime {
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let input_write_seq = Arc::new(AtomicU64::new(0));
         let pty_output_seq = Arc::new(AtomicU64::new(0));
+        let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
@@ -1823,6 +1773,7 @@ impl PaneRuntime {
             let state_events = events.clone();
             let pty_output_seq = pty_output_seq.clone();
             let input_write_seq_for_task = input_write_seq.clone();
+            let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detect_reset_notify = Arc::new(Notify::new());
@@ -1834,6 +1785,7 @@ impl PaneRuntime {
                 let mut agent_presence =
                     AgentDetectionPresence::from_agent(initial_state.detected_agent);
                 let mut state = AgentState::Idle;
+                let mut last_visible_idle = initial_state.detected_agent.is_some();
                 let mut last_process_check = Instant::now();
                 let mut last_foreground_pgid = None;
                 let mut has_process_probe = false;
@@ -1877,6 +1829,7 @@ impl PaneRuntime {
                         _ = detect_reset.notified() => {
                             agent_presence = AgentDetectionPresence::from_agent(None);
                             state = AgentState::Unknown;
+                            last_visible_idle = false;
                             last_foreground_pgid = None;
                             has_process_probe = false;
                             acquisition_started_at = None;
@@ -2001,6 +1954,7 @@ impl PaneRuntime {
                                             input_write_seq_for_task.load(Ordering::Relaxed),
                                         );
                                         state = AgentState::Idle;
+                                        last_visible_idle = true;
                                         last_visible_blocker = false;
                                         last_visible_working = false;
                                         last_visible_signal_refresh = None;
@@ -2055,6 +2009,15 @@ impl PaneRuntime {
                         && agent.is_some()
                         && !foreground_shell_exit_reported;
 
+                    if full_lifecycle_authority_active_for_task.load(Ordering::Acquire)
+                        && !process_exited
+                    {
+                        pending_idle.clear();
+                        pending_working.clear();
+                        post_taint_working.clear();
+                        continue;
+                    }
+
                     if let Some(until) = agent_startup_grace_until {
                         if process_exited {
                             agent_startup_grace_until = None;
@@ -2105,76 +2068,6 @@ impl PaneRuntime {
                     }) {
                         DetectionScreenReadDecision::Read => {}
                         DetectionScreenReadDecision::Skip => continue,
-                        DetectionScreenReadDecision::EvaluatePtyWorking => {
-                            match decide_pty_working_publish_without_screen(
-                                PtyWorkingPublishInput {
-                                    agent,
-                                    current_state: state,
-                                    last_visible_blocker,
-                                    last_visible_working,
-                                    last_visible_signal_refresh,
-                                    pty_activity,
-                                    now,
-                                },
-                                &mut pending_idle,
-                                &mut pending_working,
-                                &mut post_taint_working,
-                            ) {
-                                DetectionPublishDecision::NoPublish => {}
-                                DetectionPublishDecision::Publish {
-                                    state: new_state,
-                                    visible_blocker,
-                                    visible_working,
-                                    process_exited: publish_process_exited,
-                                } => {
-                                    apply_agent_detection_publish_update(
-                                        state_events.clone(),
-                                        pane_id,
-                                        agent,
-                                        AgentDetectionPublishUpdate {
-                                            state: new_state,
-                                            visible_blocker,
-                                            visible_working,
-                                            process_exited: publish_process_exited,
-                                        },
-                                        now,
-                                        &mut state,
-                                        &mut last_visible_blocker,
-                                        &mut last_visible_working,
-                                        &mut last_visible_signal_refresh,
-                                        &mut foreground_shell_exit_reported,
-                                    )
-                                    .await;
-                                }
-                            }
-                            continue;
-                        }
-                        DetectionScreenReadDecision::Publish {
-                            state: new_state,
-                            visible_blocker,
-                            visible_working,
-                            process_exited: publish_process_exited,
-                        } => {
-                            apply_agent_detection_publish_update(
-                                state_events.clone(),
-                                pane_id,
-                                agent,
-                                AgentDetectionPublishUpdate {
-                                    state: new_state,
-                                    visible_blocker,
-                                    visible_working,
-                                    process_exited: publish_process_exited,
-                                },
-                                now,
-                                &mut state,
-                                &mut last_visible_blocker,
-                                &mut last_visible_working,
-                                &mut last_visible_signal_refresh,
-                                &mut foreground_shell_exit_reported,
-                            )
-                            .await;
-                            continue;
-                        }
                     }
 
                     let content = terminal.detection_text();
@@ -2223,16 +2116,15 @@ impl PaneRuntime {
                     };
                     match decide_screen_detection_publish(
                         ScreenDetectionPublishInput {
-                            agent,
                             screen_detection,
                             current_state: state,
+                            last_visible_idle,
                             last_visible_blocker,
                             last_visible_working,
                             last_visible_signal_refresh,
                             process_exited,
                             agent_changed,
                             pty_activity,
-                            content: &content,
                             now,
                         },
                         &mut pending_idle,
@@ -2242,6 +2134,7 @@ impl PaneRuntime {
                         DetectionPublishDecision::NoPublish => {}
                         DetectionPublishDecision::Publish {
                             state: new_state,
+                            visible_idle,
                             visible_blocker,
                             visible_working,
                             process_exited: publish_process_exited,
@@ -2252,12 +2145,14 @@ impl PaneRuntime {
                                 agent,
                                 AgentDetectionPublishUpdate {
                                     state: new_state,
+                                    visible_idle,
                                     visible_blocker,
                                     visible_working,
                                     process_exited: publish_process_exited,
                                 },
                                 now,
                                 &mut state,
+                                &mut last_visible_idle,
                                 &mut last_visible_blocker,
                                 &mut last_visible_working,
                                 &mut last_visible_signal_refresh,
@@ -2281,6 +2176,7 @@ impl PaneRuntime {
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             input_write_seq,
+            full_lifecycle_authority_active,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
@@ -2296,6 +2192,23 @@ impl PaneRuntime {
             });
         }
         self.detect_reset_notify.notify_one();
+    }
+
+    pub fn reset_agent_detection(&self) {
+        self.detect_reset_notify.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_detection_reset_notify_for_test(&self) -> Arc<Notify> {
+        self.detect_reset_notify.clone()
+    }
+
+    pub fn set_full_lifecycle_authority_active(&self, active: bool) {
+        self.full_lifecycle_authority_active
+            .store(active, Ordering::Release);
+        if active {
+            self.detect_reset_notify.notify_one();
+        }
     }
 
     pub(crate) fn current_size(&self) -> (u16, u16) {
@@ -2387,6 +2300,10 @@ impl PaneRuntime {
 
     pub fn visible_ansi(&self) -> String {
         self.terminal.visible_ansi()
+    }
+
+    pub fn detection_text(&self) -> String {
+        self.terminal.detection_text()
     }
 
     pub fn recent_text(&self, lines: usize) -> String {
@@ -2665,6 +2582,7 @@ impl PaneRuntime {
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 input_write_seq: Arc::new(AtomicU64::new(0)),
+                full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
@@ -3038,6 +2956,7 @@ mod tests {
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             input_write_seq: Arc::new(AtomicU64::new(0)),
+            full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
@@ -3068,6 +2987,7 @@ mod tests {
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             input_write_seq: Arc::new(AtomicU64::new(0)),
+            full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,

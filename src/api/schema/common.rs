@@ -15,7 +15,15 @@ pub struct PaneTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabTarget {
-    pub tab_id: String,
+    /// Positional tab id (`<workspace_id>:<number>`). Renumbers when tabs
+    /// close, so ids resolved earlier can go stale under concurrency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    /// Resolve the tab by its current label instead, atomically on the
+    /// server. Errors unless exactly one tab matches. Takes precedence
+    /// over `tab_id` when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

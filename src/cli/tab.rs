@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams};
+use crate::api::schema::{TabCreateParams, TabListParams, TabRenameParams, TabTarget};
 
 pub(super) fn run_tab_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -123,30 +123,57 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
     })
 }
 
-fn tab_get(args: &[String]) -> std::io::Result<i32> {
-    let Some(raw_tab_id) = args.first() else {
-        eprintln!("usage: herdr tab get <tab_id>");
-        return Ok(2);
-    };
-    if args.len() != 1 {
-        eprintln!("usage: herdr tab get <tab_id>");
-        return Ok(2);
+fn parse_tab_target(args: &[String], usage: &str) -> Result<TabTarget, i32> {
+    let mut tab_id = None;
+    let mut label = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--label" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --label");
+                    return Err(2);
+                };
+                label = Some(value.clone());
+                index += 2;
+            }
+            other if tab_id.is_none() && !other.starts_with('-') => {
+                tab_id = Some(super::normalize_tab_id(other));
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("{usage}");
+                return Err(2);
+            }
+        }
     }
 
-    super::runtime::tab_get(super::normalize_tab_id(raw_tab_id))
+    if tab_id.is_none() && label.is_none() {
+        eprintln!("{usage}");
+        return Err(2);
+    }
+
+    Ok(TabTarget { tab_id, label })
+}
+
+fn tab_get(args: &[String]) -> std::io::Result<i32> {
+    let target = match parse_tab_target(args, "usage: herdr tab get <tab_id> | --label <label>") {
+        Ok(target) => target,
+        Err(code) => return Ok(code),
+    };
+
+    super::runtime::tab_get(target)
 }
 
 fn tab_focus(args: &[String]) -> std::io::Result<i32> {
-    let Some(raw_tab_id) = args.first() else {
-        eprintln!("usage: herdr tab focus <tab_id>");
-        return Ok(2);
+    let target = match parse_tab_target(args, "usage: herdr tab focus <tab_id> | --label <label>") {
+        Ok(target) => target,
+        Err(code) => return Ok(code),
     };
-    if args.len() != 1 {
-        eprintln!("usage: herdr tab focus <tab_id>");
-        return Ok(2);
-    }
 
-    super::runtime::tab_focus(super::normalize_tab_id(raw_tab_id))
+    super::runtime::tab_focus(target)
 }
 
 fn tab_rename(args: &[String]) -> std::io::Result<i32> {
@@ -162,16 +189,12 @@ fn tab_rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn tab_close(args: &[String]) -> std::io::Result<i32> {
-    let Some(raw_tab_id) = args.first() else {
-        eprintln!("usage: herdr tab close <tab_id>");
-        return Ok(2);
+    let target = match parse_tab_target(args, "usage: herdr tab close <tab_id> | --label <label>") {
+        Ok(target) => target,
+        Err(code) => return Ok(code),
     };
-    if args.len() != 1 {
-        eprintln!("usage: herdr tab close <tab_id>");
-        return Ok(2);
-    }
 
-    super::runtime::tab_close(super::normalize_tab_id(raw_tab_id))
+    super::runtime::tab_close(target)
 }
 
 fn print_tab_help() {
@@ -180,8 +203,8 @@ fn print_tab_help() {
     eprintln!(
         "  herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]"
     );
-    eprintln!("  herdr tab get <tab_id>");
-    eprintln!("  herdr tab focus <tab_id>");
+    eprintln!("  herdr tab get <tab_id> | --label <label>");
+    eprintln!("  herdr tab focus <tab_id> | --label <label>");
     eprintln!("  herdr tab rename <tab_id> <label>");
-    eprintln!("  herdr tab close <tab_id>");
+    eprintln!("  herdr tab close <tab_id> | --label <label>");
 }

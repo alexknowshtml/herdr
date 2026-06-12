@@ -70,7 +70,13 @@ impl App {
     }
 
     pub(crate) fn runtime_tab_focus(&mut self, id: &'static str, tab_id: String) -> String {
-        self.dispatch_runtime_mutation(id, Method::TabFocus(TabTarget { tab_id }))
+        self.dispatch_runtime_mutation(
+            id,
+            Method::TabFocus(TabTarget {
+                tab_id: Some(tab_id),
+                label: None,
+            }),
+        )
     }
 
     pub(crate) fn runtime_tab_rename(
@@ -86,7 +92,13 @@ impl App {
     }
 
     pub(crate) fn runtime_tab_close(&mut self, id: &'static str, tab_id: String) -> String {
-        self.dispatch_runtime_mutation(id, Method::TabClose(TabTarget { tab_id }))
+        self.dispatch_runtime_mutation(
+            id,
+            Method::TabClose(TabTarget {
+                tab_id: Some(tab_id),
+                label: None,
+            }),
+        )
     }
 
     pub(crate) fn runtime_server_reload_config(&mut self, id: &'static str) -> String {

@@ -57,20 +57,20 @@ pub(super) fn tab_create(params: TabCreateParams) -> std::io::Result<i32> {
     print_method_response("cli:tab:create", Method::TabCreate(params))
 }
 
-pub(super) fn tab_get(tab_id: String) -> std::io::Result<i32> {
-    print_method_response("cli:tab:get", Method::TabGet(TabTarget { tab_id }))
+pub(super) fn tab_get(target: TabTarget) -> std::io::Result<i32> {
+    print_method_response("cli:tab:get", Method::TabGet(target))
 }
 
-pub(super) fn tab_focus(tab_id: String) -> std::io::Result<i32> {
-    print_method_response("cli:tab:focus", Method::TabFocus(TabTarget { tab_id }))
+pub(super) fn tab_focus(target: TabTarget) -> std::io::Result<i32> {
+    print_method_response("cli:tab:focus", Method::TabFocus(target))
 }
 
 pub(super) fn tab_rename(params: TabRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:tab:rename", Method::TabRename(params))
 }
 
-pub(super) fn tab_close(tab_id: String) -> std::io::Result<i32> {
-    print_method_response("cli:tab:close", Method::TabClose(TabTarget { tab_id }))
+pub(super) fn tab_close(target: TabTarget) -> std::io::Result<i32> {
+    print_method_response("cli:tab:close", Method::TabClose(target))
 }
 
 pub(super) fn worktree_list(params: WorktreeListParams) -> std::io::Result<i32> {

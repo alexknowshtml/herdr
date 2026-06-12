@@ -3695,13 +3695,21 @@
         },
         "TabTarget": {
           "properties": {
+            "label": {
+              "description": "Resolve the tab by its current label instead, atomically on the\nserver. Errors unless exactly one tab matches. Takes precedence\nover `tab_id` when both are set.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "tab_id": {
-              "type": "string"
+              "description": "Positional tab id (`<workspace_id>:<number>`). Renumbers when tabs\nclose, so ids resolved earlier can go stale under concurrency.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
-          "required": [
-            "tab_id"
-          ],
           "type": "object"
         },
         "ToastHerdrPosition": {

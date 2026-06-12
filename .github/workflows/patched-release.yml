@@ -1,0 +1,178 @@
+name: Patched Release
+
+# Rebases the tab-target-label patch onto an upstream release tag, builds
+# linux-x86_64 with upstream's exact recipe, verifies the patch behavior,
+# and publishes a fork release (vX.Y.Z-patched) carrying the binary plus a
+# latest.json-shaped manifest — so the consuming machine's updater can pull
+# patched builds through the same download/atomic-rename flow it uses for
+# stock releases from herdr.dev.
+#
+# workflow_dispatch only: scheduled workflows on forks get auto-disabled by
+# GitHub, so a job on the consuming machine polls upstream releases and
+# dispatches this with the new tag (and owns the human notification).
+#
+# A rebase conflict fails the workflow — that IS the signal that the patch
+# needs a human rebase in the local clone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream release tag (e.g. v0.6.11). Empty = upstream latest."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: ogulcancelik/herdr
+  PATCH_BRANCH: tab-target-label
+  BUILD_TARGET: x86_64-unknown-linux-musl
+  LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+  LIBGHOSTTY_VT_SIMD: 'true'
+
+jobs:
+  build-patched:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve upstream tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          if gh release view "${TAG}-patched" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::${TAG}-patched already exists — nothing to do"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stash CI verify script
+        if: steps.resolve.outputs.exists == 'false'
+        run: cp ci/verify-tab-label.sh "$RUNNER_TEMP/verify-tab-label.sh"
+
+      - name: Rebase patch branch onto release tag
+        if: steps.resolve.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "patched-release[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch origin "${PATCH_BRANCH}"
+          git checkout -B "${PATCH_BRANCH}" "origin/${PATCH_BRANCH}"
+          git rebase "refs/tags/${TAG}"
+          echo "patch_head=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        if: steps.resolve.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install Zig
+        if: steps.resolve.outputs.exists == 'false'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Install Linux build tools
+        if: steps.resolve.outputs.exists == 'false'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build musl-tools
+
+      - name: Cache Rust artifacts
+        if: steps.resolve.outputs.exists == 'false'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: patched-release-x86_64-unknown-linux-musl
+
+      - name: Remove Zig caches
+        if: steps.resolve.outputs.exists == 'false'
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+
+      - name: Build
+        if: steps.resolve.outputs.exists == 'false'
+        run: cargo build --release --locked --target "$BUILD_TARGET"
+
+      - name: Smoke test
+        if: steps.resolve.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          BIN="target/${BUILD_TARGET}/release/herdr"
+          GOT="$("$BIN" --version | awk '{print $2}')"
+          if [ "$GOT" != "$VERSION" ]; then
+            echo "binary reports '$GOT', expected '$VERSION'"
+            exit 1
+          fi
+
+      - name: Verify patch behavior (isolated server)
+        if: steps.resolve.outputs.exists == 'false'
+        run: HERDR_BIN="$PWD/target/${BUILD_TARGET}/release/herdr" bash "$RUNNER_TEMP/verify-tab-label.sh"
+
+      - name: Push rebased branch (best effort)
+        if: steps.resolve.outputs.exists == 'false'
+        run: |
+          # GITHUB_TOKEN can't push commits that touch .github/workflows, and
+          # upstream releases often do. Branch currency is nice-to-have; the
+          # local clone is source of truth and force-pushes after manual
+          # rebases anyway. The release below records the exact patch head.
+          git push -f origin "${PATCH_BRANCH}" \
+            || echo "::warning::branch push rejected (likely workflow-file changes upstream); push from the local clone after the next manual rebase"
+
+      - name: Build release manifest
+        if: steps.resolve.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          cp "target/${BUILD_TARGET}/release/herdr" herdr-linux-x86_64
+          # protocol is informational; the updater decides restarts from
+          # `herdr status` post-install, not from the manifest.
+          PROTOCOL="$(curl -fsSL --max-time 30 https://herdr.dev/latest.json | jq --arg v "$VERSION" '.releases[$v].protocol // null')" || PROTOCOL=null
+          jq -n \
+            --arg version "$VERSION" \
+            --arg base_tag "$TAG" \
+            --arg patch_head "${patch_head:-unknown}" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}-patched/herdr-linux-x86_64" \
+            --argjson protocol "$PROTOCOL" \
+            '{version: $version, protocol: $protocol,
+              patch: {branch: "tab-target-label", base_tag: $base_tag, head: $patch_head},
+              assets: {"linux-x86_64": $url}}' \
+            | tee latest.json
+
+      - name: Create release
+        if: steps.resolve.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}-patched" \
+            herdr-linux-x86_64 latest.json \
+            -R "$GITHUB_REPOSITORY" \
+            --target master \
+            --title "herdr ${VERSION} + tab-target-label" \
+            --notes "Upstream [${TAG}](https://github.com/${UPSTREAM_REPO}/releases/tag/${TAG}) rebuilt with the \`tab-target-label\` patch (atomic \`tab get|focus|close --label\`; PR #1).
+
+          Patch head: \`${patch_head:-unknown}\` (release tag points at master; the patched source is the rebased \`tab-target-label\` branch).
+
+          Verified in CI: ci/verify-tab-label.sh — stale-positional-id hazard reproduced on an isolated server, label-close closed the intended tab under concurrent renumbering, not-found and ambiguous labels errored without closing anything."

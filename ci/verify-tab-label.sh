@@ -113,8 +113,10 @@ S1=$(survivors)
 echo "=== Survivors: $S1"
 if echo "$S1" | grep -q "repro-bravo" && ! echo "$S1" | grep -q "repro-charlie"; then
   echo "PHASE 1 RESULT: BUG REPRODUCED — close($STALE_ID) killed repro-charlie (innocent bystander); repro-bravo (intended target) survived."
+elif ! echo "$S1" | grep -q "repro-bravo" && echo "$S1" | grep -q "repro-charlie"; then
+  echo "PHASE 1 RESULT: NOT REPRODUCED (stable tab IDs — v0.7.0+ does not renumber after close; stale ID still pointed at bravo and correctly closed it). Root cause moot; --label still valuable as atomic semantic targeting."
 else
-  echo "PHASE 1 RESULT: NOT REPRODUCED — survivors: $S1"
+  echo "PHASE 1 RESULT: UNEXPECTED — survivors: $S1"
   FAIL=1
 fi
 
@@ -161,3 +163,4 @@ AMB=$("$HERDR" tab close --label dupe 2>&1)
 echo "$AMB" | grep -q "tab_target_ambiguous" && echo "=== ambiguous label errors correctly (no tab closed)" || { echo "=== FAIL: ambiguous label did not error: $AMB"; FAIL=1; }
 
 exit $FAIL
+

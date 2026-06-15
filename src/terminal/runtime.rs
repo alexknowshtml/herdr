@@ -85,10 +85,10 @@ impl TerminalRuntime {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &crate::pane::PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<Self> {
         crate::pane::PaneRuntime::spawn(
             pane_id,
@@ -98,10 +98,10 @@ impl TerminalRuntime {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            launch_env,
             events,
             render_notify,
             render_dirty,
-            public_pane_id,
         )
         .map(Self)
     }
@@ -116,11 +116,11 @@ impl TerminalRuntime {
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &crate::pane::PaneLaunchEnv,
         initial_history_ansi: Option<&str>,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<Self> {
         crate::pane::PaneRuntime::spawn_with_initial_history(
             pane_id,
@@ -130,11 +130,11 @@ impl TerminalRuntime {
             scrollback_limit_bytes,
             host_terminal_theme,
             shell_config,
+            launch_env,
             initial_history_ansi,
             events,
             render_notify,
             render_dirty,
-            public_pane_id,
         )
         .map(Self)
     }
@@ -147,13 +147,12 @@ impl TerminalRuntime {
         cols: u16,
         cwd: std::path::PathBuf,
         command: &str,
-        extra_env: &[(String, String)],
+        launch_env: &crate::pane::PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<Self> {
         crate::pane::PaneRuntime::spawn_shell_command(
             pane_id,
@@ -161,13 +160,12 @@ impl TerminalRuntime {
             cols,
             cwd,
             command,
-            extra_env,
+            launch_env,
             scrollback_limit_bytes,
             host_terminal_theme,
             events,
             render_notify,
             render_dirty,
-            public_pane_id,
         )
         .map(Self)
     }
@@ -178,12 +176,12 @@ impl TerminalRuntime {
         cols: u16,
         cwd: std::path::PathBuf,
         argv: &[String],
+        launch_env: &crate::pane::PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<AtomicBool>,
-        public_pane_id: Option<&str>,
     ) -> std::io::Result<Self> {
         crate::pane::PaneRuntime::spawn_argv_command(
             pane_id,
@@ -191,12 +189,12 @@ impl TerminalRuntime {
             cols,
             cwd,
             argv,
+            launch_env,
             scrollback_limit_bytes,
             host_terminal_theme,
             events,
             render_notify,
             render_dirty,
-            public_pane_id,
         )
         .map(Self)
     }
@@ -410,6 +408,10 @@ impl TerminalRuntime {
 
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         self.0.foreground_cwd()
+    }
+
+    pub fn child_pid(&self) -> Option<u32> {
+        self.0.child_pid()
     }
 
     pub(crate) fn current_size(&self) -> (u16, u16) {

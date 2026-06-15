@@ -9,6 +9,42 @@ use crate::app::{App, Mode};
 use super::responses::{encode_error, encode_success};
 
 impl App {
+    /// Resolve a TabTarget to workspace/tab indices. Label resolution runs
+    /// atomically on the app thread, so it cannot go stale the way
+    /// positional tab ids do when concurrent closes renumber tabs.
+    fn resolve_tab_target(
+        &self,
+        target: &TabTarget,
+    ) -> Result<(usize, usize), (&'static str, String)> {
+        if let Some(label) = &target.label {
+            let mut matches = Vec::new();
+            for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
+                for (tab_idx, _) in ws.tabs.iter().enumerate() {
+                    if ws.tab_display_name(tab_idx).as_deref() == Some(label.as_str()) {
+                        matches.push((ws_idx, tab_idx));
+                    }
+                }
+            }
+            return match matches.len() {
+                1 => Ok(matches[0]),
+                0 => Err(("tab_not_found", format!("no tab with label {label}"))),
+                n => Err((
+                    "tab_target_ambiguous",
+                    format!("label {label} matches {n} tabs"),
+                )),
+            };
+        }
+        if let Some(tab_id) = &target.tab_id {
+            return self
+                .parse_tab_id(tab_id)
+                .ok_or_else(|| ("tab_not_found", format!("tab {tab_id} not found")));
+        }
+        Err((
+            "invalid_params",
+            "tab target requires tab_id or label".to_string(),
+        ))
+    }
+
     pub(super) fn handle_tab_list(&mut self, id: String, params: TabListParams) -> String {
         let tabs = if let Some(workspace_id) = params.workspace_id {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
@@ -36,11 +72,12 @@ impl App {
     }
 
     pub(super) fn handle_tab_get(&mut self, id: String, target: TabTarget) -> String {
-        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
-            return tab_not_found(id, &target.tab_id);
+        let (ws_idx, tab_idx) = match self.resolve_tab_target(&target) {
+            Ok(loc) => loc,
+            Err((code, message)) => return encode_error(id, code, message),
         };
         let Some(tab) = self.tab_info(ws_idx, tab_idx) else {
-            return tab_not_found(id, &target.tab_id);
+            return encode_error(id, "tab_not_found", "tab not found");
         };
 
         encode_success(id, ResponseResult::TabInfo { tab })
@@ -52,6 +89,7 @@ impl App {
             cwd,
             focus,
             label,
+            env,
         } = params;
         let ws_idx = if let Some(workspace_id) = workspace_id {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
@@ -74,6 +112,10 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let extra_env = match super::env::normalize_launch_env(env) {
+            Ok(env) => env,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
         let result = self
             .state
             .workspaces
@@ -87,6 +129,7 @@ impl App {
                     scrollback_limit_bytes,
                     host_terminal_theme,
                     crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode),
+                    extra_env,
                 )
             });
         match result {
@@ -99,11 +142,7 @@ impl App {
                 if let Some(label) = label {
                     let workspace_id = self.state.workspaces[ws_idx].id.clone();
                     let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
-                        format!(
-                            "{}:t{}",
-                            workspace_id,
-                            crate::workspace::encode_public_number(tab_idx + 1)
-                        )
+                        crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
                     });
                     if let Some(tab) = self
                         .state
@@ -145,8 +184,9 @@ impl App {
     }
 
     pub(super) fn handle_tab_focus(&mut self, id: String, target: TabTarget) -> String {
-        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
-            return tab_not_found(id, &target.tab_id);
+        let (ws_idx, tab_idx) = match self.resolve_tab_target(&target) {
+            Ok(loc) => loc,
+            Err((code, message)) => return encode_error(id, code, message),
         };
         self.state.switch_workspace_tab(ws_idx, tab_idx);
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
@@ -159,9 +199,9 @@ impl App {
             return tab_not_found(id, &params.tab_id);
         };
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
-        let tab_id = self
-            .public_tab_id(ws_idx, tab_idx)
-            .unwrap_or_else(|| format!("{}:{}", workspace_id, tab_idx + 1));
+        let tab_id = self.public_tab_id(ws_idx, tab_idx).unwrap_or_else(|| {
+            crate::workspace::public_tab_id_for_number(&workspace_id, tab_idx + 1)
+        });
         let Some(tab) = self
             .state
             .workspaces
@@ -187,16 +227,27 @@ impl App {
     }
 
     pub(super) fn handle_tab_close(&mut self, id: String, target: TabTarget) -> String {
-        let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
-            return tab_not_found(id, &target.tab_id);
+        let (ws_idx, tab_idx) = match self.resolve_tab_target(&target) {
+            Ok(loc) => loc,
+            Err((code, message)) => return encode_error(id, code, message),
         };
-        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
-            return tab_not_found(id, &target.tab_id);
-        };
-        let workspace_id = self.public_workspace_id(ws_idx);
+        let closed_tab_id = self
+            .public_tab_id(ws_idx, tab_idx)
+            .unwrap_or_else(|| format!("{}:{}", self.public_workspace_id(ws_idx), tab_idx + 1));
         let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
+        let pane_ids = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .map(|tab| tab.layout.pane_ids())
+            .unwrap_or_default();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
-            return tab_not_found(id, &target.tab_id);
+            return encode_error(
+                id,
+                "tab_not_found",
+                format!("tab {closed_tab_id} not found"),
+            );
         };
         if ws.tabs.len() <= 1 {
             return encode_error(
@@ -209,8 +260,11 @@ impl App {
             return encode_error(
                 id,
                 "tab_close_failed",
-                format!("tab {} could not be closed", target.tab_id),
+                format!("tab {closed_tab_id} could not be closed"),
             );
+        }
+        for pane_id in pane_ids {
+            self.state.plugin_panes.remove(&pane_id);
         }
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
@@ -218,8 +272,8 @@ impl App {
         self.emit_event(EventEnvelope {
             event: EventKind::TabClosed,
             data: EventData::TabClosed {
-                tab_id,
-                workspace_id,
+                tab_id: closed_tab_id,
+                workspace_id: self.public_workspace_id(ws_idx),
             },
         });
 

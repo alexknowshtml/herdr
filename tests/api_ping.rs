@@ -304,7 +304,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
-    assert_eq!(value["result"]["protocol"], 13);
+    assert_eq!(value["result"]["protocol"], 14);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -1555,7 +1555,7 @@ fn pane_report_agent_updates_effective_state() {
     );
     assert_eq!(
         blank_source_metadata["error"]["code"],
-        "invalid_metadata_request"
+        "invalid_metadata_source"
     );
 
     let blank_title_clear_metadata = send_request(
@@ -1579,7 +1579,7 @@ fn pane_report_agent_updates_effective_state() {
     );
     assert_eq!(
         blank_authority_source_metadata["error"]["code"],
-        "invalid_metadata_request"
+        "invalid_metadata_source"
     );
 
     cleanup_spawned_herdr(child, base);

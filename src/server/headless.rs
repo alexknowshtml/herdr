@@ -100,7 +100,7 @@ fn non_empty_body(value: &str) -> Option<String> {
 enum LoopEvent {
     Timer,
     Internal(AppEvent),
-    Api(api::ApiRequestMessage),
+    Api(Box<api::ApiRequestMessage>),
     ServerEvent(ServerEvent),
     RenderRequested,
 }
@@ -637,7 +637,7 @@ impl HeadlessServer {
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
-                        Some(msg) => LoopEvent::Api(msg),
+                        Some(msg) => LoopEvent::Api(Box::new(msg)),
                         None => LoopEvent::Timer,
                     },
                     maybe_ev = self.app.event_rx.recv() => match maybe_ev {
@@ -662,7 +662,7 @@ impl HeadlessServer {
                     }
                 }
                 LoopEvent::Api(msg) => {
-                    if self.handle_api_request_with_shutdown_check(msg) {
+                    if self.handle_api_request_with_shutdown_check(*msg) {
                         needs_render = true;
                         needs_full_render = true;
                     }
@@ -1603,6 +1603,39 @@ impl HeadlessServer {
         .unwrap_or_else(|_| "{}".to_string())
     }
 
+    fn handle_client_window_title_api(&mut self, id: String, title: Option<String>) -> String {
+        use api::schema::{ClientWindowTitleReason, ResponseResult};
+
+        let title = match title {
+            Some(title) => match sanitize_window_title_text(&title, 200) {
+                Some(title) => Some(title),
+                None => {
+                    return serde_json::to_string(&api::schema::ErrorResponse {
+                        id,
+                        error: api::schema::ErrorBody {
+                            code: "invalid_params".into(),
+                            message: "window title is empty".into(),
+                        },
+                    })
+                    .unwrap_or_else(|_| "{}".to_string());
+                }
+            },
+            None => None,
+        };
+        let set_title = title.is_some();
+        let changed = self.send_to_foreground_client(ServerMessage::WindowTitle { title });
+        let reason = match (changed, set_title) {
+            (true, true) => ClientWindowTitleReason::Set,
+            (true, false) => ClientWindowTitleReason::Cleared,
+            (false, _) => ClientWindowTitleReason::NoForegroundClient,
+        };
+        serde_json::to_string(&api::schema::SuccessResponse {
+            id,
+            result: ResponseResult::ClientWindowTitle { changed, reason },
+        })
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
     fn forward_api_notification_sound(&mut self, sound: api::schema::NotificationShowSound) {
         let Some(sound) = sound.to_sound() else {
             return;
@@ -2509,6 +2542,23 @@ impl HeadlessServer {
                 self.handle_notification_show_api(msg.request.id.clone(), params.clone());
             let _ = msg.respond_to.send(response);
             return true;
+        }
+
+        match &msg.request.method {
+            api::schema::Method::ClientWindowTitleSet(params) => {
+                let response = self.handle_client_window_title_api(
+                    msg.request.id.clone(),
+                    Some(params.title.clone()),
+                );
+                let _ = msg.respond_to.send(response);
+                return true;
+            }
+            api::schema::Method::ClientWindowTitleClear(_) => {
+                let response = self.handle_client_window_title_api(msg.request.id.clone(), None);
+                let _ = msg.respond_to.send(response);
+                return true;
+            }
+            _ => {}
         }
 
         let mut changed = api::request_changes_ui(&msg.request);
@@ -3541,6 +3591,17 @@ fn sanitize_notification_text(value: &str, max_chars: usize) -> Option<String> {
         }
     }
     let sanitized = sanitized.trim().to_string();
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
+fn sanitize_window_title_text(value: &str, max_chars: usize) -> Option<String> {
+    let sanitized = value
+        .chars()
+        .filter(|ch| !matches!(*ch, '\u{1b}' | '\u{7}' | '\u{9c}') && !ch.is_control())
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string();
     (!sanitized.is_empty()).then_some(sanitized)
 }
 

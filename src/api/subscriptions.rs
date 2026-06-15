@@ -128,6 +128,18 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceFocused,
                 last_sequence: 0,
             })),
+            Subscription::WorktreeCreated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorktreeCreated,
+                last_sequence: 0,
+            })),
+            Subscription::WorktreeOpened {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorktreeOpened,
+                last_sequence: 0,
+            })),
+            Subscription::WorktreeRemoved {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorktreeRemoved,
+                last_sequence: 0,
+            })),
             Subscription::TabCreated {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::TabCreated,
                 last_sequence: 0,
@@ -154,6 +166,10 @@ impl ActiveSubscription {
             })),
             Subscription::PaneFocused {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::PaneFocused,
+                last_sequence: 0,
+            })),
+            Subscription::PaneMoved {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneMoved,
                 last_sequence: 0,
             })),
             Subscription::PaneExited {} => Ok(Self::Event(ActiveEventSubscription {

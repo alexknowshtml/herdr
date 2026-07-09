@@ -162,5 +162,35 @@ hj tab create --workspace "$WS_ID" --label dupe --cwd /tmp >/dev/null
 AMB=$("$HERDR" tab close --label dupe 2>&1)
 echo "$AMB" | grep -q "tab_target_ambiguous" && echo "=== ambiguous label errors correctly (no tab closed)" || { echo "=== FAIL: ambiguous label did not error: $AMB"; FAIL=1; }
 
+echo ""
+echo "=== PHASE 3: get/focus by --label + positional backward compat ==="
+# The patch re-routes get/focus/close through the same parse_tab_target ->
+# runtime::tab_* -> Method::Tab* path. PHASE 2 only exercises close, so get and
+# focus need direct coverage — a bad rebase can break them while close passes.
+make_tabs read
+
+# get --label resolves the intended tab
+GB=$(hj tab get --label read-bravo | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['tab']['label'])" 2>/dev/null)
+[ "$GB" = "read-bravo" ] && echo "=== get --label read-bravo -> $GB" || { echo "=== FAIL: get --label returned '$GB' (want read-bravo)"; FAIL=1; }
+
+# focus --label resolves and focuses the intended tab
+FC=$(hj tab focus --label read-charlie | python3 -c "import json,sys; t=json.load(sys.stdin)['result']['tab']; print(t['label'], t.get('focused'))" 2>/dev/null)
+[ "$FC" = "read-charlie True" ] && echo "=== focus --label read-charlie -> $FC" || { echo "=== FAIL: focus --label returned '$FC' (want 'read-charlie True')"; FAIL=1; }
+
+# positional tab_id still works (wire-format backward compat)
+RA_ID=$(resolve_label read-alpha)
+PA=$(hj tab get "$RA_ID" | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['tab']['label'])" 2>/dev/null)
+[ "$PA" = "read-alpha" ] && echo "=== positional get $RA_ID -> $PA (backward compat)" || { echo "=== FAIL: positional get returned '$PA' (want read-alpha)"; FAIL=1; }
+
+# get --label with no match errors
+GNF=$("$HERDR" tab get --label no-such-label-zzz 2>&1)
+echo "$GNF" | grep -q "tab_not_found" && echo "=== get --label not-found errors correctly" || { echo "=== FAIL: get --label not-found did not error: $GNF"; FAIL=1; }
+
+# get with neither tab_id nor label is a usage error (exit 2), never a silent success
+"$HERDR" tab get >/dev/null 2>&1; GC=$?
+[ "$GC" = "2" ] && echo "=== get with no target exits 2 (usage error)" || { echo "=== FAIL: get with no target exited $GC (want 2)"; FAIL=1; }
+
+close_label_tabs read
+
 exit $FAIL
 
